@@ -122,7 +122,6 @@ Below is a screenshot of the MCP server API test via [Swagger UI](http://localho
 ```text
 Vulners-MCP
 ├── vulners_mcp.py          # Main entry point for the MCP server
-├── vulners_mcp_test.py     # Test script for the MCP server
 ├── requirements.txt        # Project dependencies
 ├── Dockerfile              # Docker configuration
 ├── LICENSE                 # Project license information
