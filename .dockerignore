@@ -1,0 +1,13 @@
+# Exclude large CAPEC taxonomy file (downloaded during build)
+1000.xml
+
+# Common development files
+.git
+.gitignore
+*.md
+.DS_Store
+__pycache__
+*.pyc
+.pytest_cache
+.venv
+venv
