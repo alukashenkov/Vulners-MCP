@@ -10,12 +10,18 @@ The Vulners MCP is a server designed to retrieve CVE details and information abo
   - **Weakness Analysis**: CWE classifications with consequence analysis (security scopes and potential impacts) and related CAPEC attack patterns with cross-framework taxonomy mappings
   - **Exploitation Intelligence**: Real-world exploitation status with authoritative source attribution and timeline confirmation
   - **Affected Products**: Platform-aware product listings with intelligent vendor deduplication for precise asset inventory mapping
+  - **Connected Document Discovery** (CVE tool only): Retrieve and analyze related security intelligence from 200+ sources including:
+    - **Security Advisories**: Vendor patches, technical bulletins, and official remediation guidance  
+    - **Vulnerability Chains**: Cross-referenced CVEs and dependency analysis for understanding broader attack surfaces
+    - **Solutions Repository**: Combined remediation guidance from official CVE documents and various security intelligence sources
+    - **Workarounds**: Temporary mitigations and alternative security measures when available
 
-- **Connected Document Discovery**: Retrieve and analyze related security intelligence from 200+ sources including:
-  - **Security Advisories**: Vendor patches, technical bulletins, and official remediation guidance  
-  - **Vulnerability Chains**: Cross-referenced CVEs and dependency analysis for understanding broader attack surfaces
-  - **Solutions Repository**: Combined remediation guidance from official CVE documents and various security intelligence sources
-  - **Workarounds**: Temporary mitigations and alternative security measures when available
+- **Security Bulletin Intelligence**: The `vulners_bulletin_info` tool provides essential bulletin information for non-CVE security documents including:
+  - **Bulletin Metadata**: Official ID, publication date, title, and comprehensive description for GHSA, RHSA, NASL, and vendor advisories
+  - **CVE Cross-References**: Complete list of CVE identifiers mentioned in bulletins for further analysis with the CVE tool
+  - **Reference Links**: Official advisory URLs, vendor patches, and technical documentation sources
+  - **Bulletin Classification**: Document type and classification for understanding advisory structure
+
 - **MCP Server**: Serve data through a robust and extensible MCP server for seamless integration with other tools.
 - **Docker Support**: Easily deploy the server using Docker for a consistent and portable runtime environment.
 - **Cursor Compatibility**: Integrate with Cursor MCP for enhanced developer workflows.
@@ -121,37 +127,43 @@ When debug mode is enabled:
 
 #### Sample Output Files
 
-The repository includes sample debug output files demonstrating the tool's comprehensive vulnerability analysis:
+The repository includes sample debug output files demonstrating the CVE analysis tool's comprehensive vulnerability intelligence:
+
+**CVE Analysis Tool Samples:**
 
 - **[CVE-2025-53770](vulners_mcp_output_CVE-2025-53770.txt)** - Microsoft SharePoint Server vulnerability with multi-source solutions
 - **[CVE-2025-31205](vulners_mcp_output_CVE-2025-31205.txt)** - WebKit vulnerability affecting multiple platforms  
 - **[CVE-2025-7395](vulners_mcp_output_CVE-2025-7395.txt)** - OpenSSL vulnerability with EPSS scoring
 
-These files showcase the structured output format including CVSS metrics, CWE classifications, CAPEC attack patterns, exploitation status, affected products, and comprehensive solutions from multiple security intelligence sources.
+These files showcase the structured output format including CVSS metrics, CWE classifications, CAPEC attack patterns, exploitation status, affected products, and comprehensive solutions from multiple security intelligence sources. The Security Bulletin Tool produces simpler structured output focused on bulletin metadata and CVE cross-references.
 
 Restart Claude Desktop. Your configuration should look like this:
 
 ![Vulners MCP Claude Configuration](images/Claude_MCP_Configuration.png)
 
-### 2. Vulners_CVE_Info MCP Tool
+### 2. Vulners MCP Tools
 
-When asked about a CVE, Claude reliably invokes the MCP server tool to get information about the CVE.
+The Vulners MCP server provides two powerful tools for vulnerability intelligence:
+
+#### CVE Analysis Tool (`vulners_cve_info`)
+
+When asked about a CVE, Claude reliably invokes the MCP server tool to get comprehensive information about the CVE, including CVSS scores, exploitation status, affected products, and related documents.
+
+#### Security Bulletin Tool (`vulners_bulletin_info`)
+
+For non-CVE security bulletins (GHSA, RHSA, NASL, advisories), Claude can retrieve essential bulletin metadata including publication details, descriptions, reference links, and most importantly, the CVE identifiers mentioned in the bulletin. This tool is designed to extract basic bulletin information and identify related CVEs that can then be analyzed in detail using the CVE analysis tool.
 
 ![Vulners MCP Tool Results](images/Claude_MCP_Tool_Usage.png)
 
-### 3. Vulners MCP Prompt
+Both tools provide structured, machine-readable output optimized for LLM consumption. The CVE tool enables comprehensive vulnerability analysis reports, while the bulletin tool helps identify and cross-reference CVEs mentioned in security advisories for further detailed analysis.
 
-You can also add a specialized prompt from Vulners MCP to a Claude chat to guide the CVE analysis.
-
-![Vulners MCP Prompt Results](images/Claude_MCP_Prompt_Usage.png)
-
-### 4. Configuring and using Vulners MCP Server in Cursor
+### 3. Configuring and using Vulners MCP Server in Cursor
 
 You can use exactly the same MCP configuration to add Vulners MCP to Cursor. To do that, go to **Cursor > Settings > Cursor Settings > MCP > Add new global MCP server** and update `mcp.json` accordingly.
 
 **Note**: The same `DEBUG` environment variable option described above works with Cursor as well. Simply include `"DEBUG": "true"` in the `env` section of your `mcp.json` configuration to enable debug mode and automatic output file generation.
 
-After that, you can get info about a CVE right in your development environment. The models' settings appear to make responses very precise, but this is still useful for rapid development iteration.
+After that, you can get comprehensive CVE vulnerability intelligence and extract bulletin information with CVE cross-references right in your development environment. The models' settings appear to make responses very precise, but this is still useful for rapid development iteration and security analysis.
 
 ![Vulners MCP Cursor Results](images/Cursor_MCP_Tool_Usage.png)
 
@@ -204,7 +216,6 @@ Vulners-MCP/
 ├── images/                     # Documentation screenshots and diagrams
 │   ├── Claude_MCP_Configuration.png
 │   ├── Claude_MCP_Tool_Usage.png
-│   ├── Claude_MCP_Prompt_Usage.png
 │   ├── Cursor_MCP_Tool_Usage.png
 │   └── Vulners-MCP_Swagger_UI.png
 ├── vulners_mcp_output_CVE-2025-53770.txt   # Sample: SharePoint vulnerability analysis
