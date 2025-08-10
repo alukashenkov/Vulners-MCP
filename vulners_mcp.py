@@ -439,6 +439,7 @@ async def _fetch_related_documents_data(cve_data_json: dict, api_key: str) -> di
     result = {
         'documents': [],
         'related_cves': [],
+        'cve_source_tracking': {},  # Track which documents mention each CVE
         'error': None,
         'document_count': 0,
         'affected_os_by_document': {},
@@ -497,8 +498,20 @@ async def _fetch_related_documents_data(cve_data_json: dict, api_key: str) -> di
                                 result['error'] = 'NO_DETAILS_FOUND'
                                 return result
                             else:
-                                result['document_count'] = len(doc_list)
+                                # Filter documents first based on CVE count, then process
+                                filtered_docs = []
                                 for doc_content in doc_list:
+                                    cvelist = doc_content.get('cvelist')
+                                    # Only include documents with 5 or fewer CVEs in their cvelist
+                                    if not isinstance(cvelist, list) or len(cvelist) <= 5:
+                                        filtered_docs.append(doc_content)
+                                
+                                if not filtered_docs:
+                                    result['error'] = 'NO_DETAILS_FOUND'
+                                    return result
+                                
+                                result['document_count'] = len(filtered_docs)
+                                for doc_content in filtered_docs:
                                     doc_entry = {
                                         'id': doc_content.get('id', 'N/A'),
                                         'type': doc_content.get('bulletinFamily', 'N/A'),
@@ -510,8 +523,25 @@ async def _fetch_related_documents_data(cve_data_json: dict, api_key: str) -> di
                                     result['documents'].append(doc_entry)
                                     
                                     cvelist = doc_content.get('cvelist')
-                                    if isinstance(cvelist, list) and len(cvelist) <= 5:
-                                        result['related_cves'].extend(cvelist)
+                                    if isinstance(cvelist, list):
+                                        doc_id = doc_content.get('id', 'unknown')
+                                        doc_type = doc_content.get('bulletinFamily', doc_content.get('type', 'unknown'))
+                                        
+                                        # Add CVEs to the main list and track their sources
+                                        for cve in cvelist:
+                                            if isinstance(cve, str):
+                                                cve_upper = cve.upper()
+                                                result['related_cves'].append(cve_upper)
+                                                
+                                                # Track which document mentioned this CVE
+                                                if cve_upper not in result['cve_source_tracking']:
+                                                    result['cve_source_tracking'][cve_upper] = []
+                                                
+                                                result['cve_source_tracking'][cve_upper].append({
+                                                    'doc_id': doc_id,
+                                                    'doc_type': doc_type,
+                                                    'view_count': doc_content.get('viewCount', 0)
+                                                })
                                     
                                     # Process affected packages - track OS/version and document references
                                     affected_packages = doc_content.get('affectedPackage')
@@ -577,10 +607,160 @@ async def _fetch_related_documents_data(cve_data_json: dict, api_key: str) -> di
             except Exception as e:
                 result['error'] = f"UNEXPECTED_ERROR_{str(e)}"
 
-    # Remove duplicates from related CVEs
-    result['related_cves'] = list(set(result['related_cves']))
+    # Apply intelligent CVE filtering based on frequency and evidence strength
+    result['related_cves'] = _filter_cves_by_frequency(result['related_cves'], result['cve_source_tracking'])
     
     return result
+
+def _filter_cves_by_frequency(related_cves: list, cve_source_tracking: dict) -> list[str]:
+    """Applies intelligent CVE filtering based on frequency and evidence strength.
+    
+    This function implements sophisticated logic to filter out "fat finger" CVE mentions
+    while preserving legitimate vulnerability connections. It considers:
+    - Frequency of CVE mentions across documents
+    - Quality of evidence (document type diversity, popularity)
+    - Statistical distribution of evidence strength
+    
+    Args:
+        related_cves: List of CVE IDs that may contain duplicates
+        cve_source_tracking: Dictionary mapping CVE IDs to their source documents
+        
+    Returns:
+        Filtered list of CVE IDs with low-confidence entries removed
+    """
+    if not related_cves:
+        return []
+    
+    # Handle edge case: empty or invalid source tracking
+    if not cve_source_tracking or not isinstance(cve_source_tracking, dict):
+        logging.debug("CVE filtering: No source tracking data, falling back to simple deduplication")
+        return sorted(list(set(cve.upper() for cve in related_cves if isinstance(cve, str))))
+    
+    # Count frequency of each CVE and assess evidence quality
+    cve_frequency = {}
+    cve_evidence_quality = {}
+    
+    for cve in related_cves:
+        if isinstance(cve, str):
+            cve_upper = cve.upper()
+            cve_frequency[cve_upper] = cve_frequency.get(cve_upper, 0) + 1
+    
+    # Assess evidence quality for each CVE based on source tracking
+    for cve_id, sources in cve_source_tracking.items():
+        if isinstance(sources, list):
+            # Count unique document types and total view counts
+            doc_types = set()
+            total_view_count = 0
+            unique_docs = len(sources)
+            
+            for source in sources:
+                if isinstance(source, dict):
+                    doc_types.add(source.get('doc_type', 'unknown'))
+                    view_count = source.get('view_count', 0)
+                    if isinstance(view_count, (int, float)):
+                        total_view_count += view_count
+            
+            # Quality score based on source diversity and popularity
+            type_diversity_score = len(doc_types)
+            popularity_score = total_view_count / 1000  # Normalize view counts
+            
+            cve_evidence_quality[cve_id] = {
+                'mention_count': unique_docs,
+                'type_diversity': type_diversity_score,
+                'popularity': popularity_score,
+                'quality_score': unique_docs + type_diversity_score * 0.5 + min(popularity_score, 2.0)
+            }
+    
+    # Get total number of unique CVEs and total evidence count
+    unique_cve_count = len(cve_frequency)
+    total_evidence = sum(cve_frequency.values())
+    
+    logging.debug(f"CVE filtering: {unique_cve_count} unique CVEs, {total_evidence} total evidence points")
+    
+    # Apply intelligent filtering logic based on evidence strength and quality
+    if total_evidence <= 2:
+        # Very few total sightings - keep everything
+        filtered_cves = list(cve_frequency.keys())
+        logging.debug("CVE filtering: Keeping all CVEs (low total evidence)")
+    elif unique_cve_count <= 3:
+        # Small number of unique CVEs - keep everything
+        filtered_cves = list(cve_frequency.keys())
+        logging.debug("CVE filtering: Keeping all CVEs (few unique CVEs)")
+    else:
+        # Apply intelligent filtering for larger datasets using both frequency and quality
+        filtered_cves = []
+        
+        # Calculate composite scores combining frequency and evidence quality
+        cve_scores = {}
+        max_frequency = max(cve_frequency.values())
+        
+        for cve_id, frequency in cve_frequency.items():
+            # Base score from frequency
+            frequency_score = frequency
+            
+            # Quality bonus from evidence assessment
+            quality_info = cve_evidence_quality.get(cve_id, {})
+            quality_score = quality_info.get('quality_score', 1.0)
+            
+            # Composite score: frequency + quality bonus
+            composite_score = frequency_score + (quality_score * 0.3)
+            cve_scores[cve_id] = {
+                'frequency': frequency,
+                'quality_score': quality_score,
+                'composite_score': composite_score,
+                'quality_info': quality_info
+            }
+        
+        # Determine filtering threshold (with safety checks for empty data)
+        if not cve_scores:
+            logging.debug("CVE filtering: No valid CVE scores calculated")
+            return sorted(list(cve_frequency.keys()))
+            
+        max_composite = max(score_data['composite_score'] for score_data in cve_scores.values())
+        avg_composite = sum(score_data['composite_score'] for score_data in cve_scores.values()) / unique_cve_count
+        
+        # Dynamic threshold based on data distribution
+        if max_frequency >= 3:
+            # Strong evidence available - be more selective
+            base_threshold = max(1.5, avg_composite * 0.6)
+        else:
+            # Weaker evidence - be more lenient
+            base_threshold = max(1.0, avg_composite * 0.4)
+        
+        # Consider evidence spread - if there's a big gap between top and average, be more selective
+        if max_composite > avg_composite * 2:
+            threshold = max(base_threshold, avg_composite * 0.8)
+        else:
+            threshold = base_threshold
+        
+        # Filter CVEs based on composite score
+        for cve_id, score_data in cve_scores.items():
+            if score_data['composite_score'] >= threshold:
+                filtered_cves.append(cve_id)
+        
+        # Safety net: ensure we don't filter too aggressively
+        if len(filtered_cves) < 2 and unique_cve_count > 2:
+            # Sort by composite score and take top performers
+            sorted_cves = sorted(cve_scores.items(), key=lambda x: x[1]['composite_score'], reverse=True)
+            top_count = max(2, unique_cve_count // 2)
+            filtered_cves = [cve_id for cve_id, _ in sorted_cves[:top_count]]
+        
+        logging.debug(f"CVE filtering: Applied composite threshold {threshold:.2f}, "
+                     f"kept {len(filtered_cves)}/{unique_cve_count} CVEs")
+        
+        # Log detailed filtering results with quality information
+        if logging.getLogger().isEnabledFor(logging.DEBUG):
+            for cve_id, score_data in sorted(cve_scores.items(), 
+                                           key=lambda x: x[1]['composite_score'], reverse=True):
+                status = "KEPT" if cve_id in filtered_cves else "FILTERED"
+                qual_info = score_data['quality_info']
+                logging.debug(f"  {cve_id}: freq={score_data['frequency']}, "
+                             f"quality={score_data['quality_score']:.2f} "
+                             f"(docs={qual_info.get('mention_count', 0)}, "
+                             f"types={qual_info.get('type_diversity', 0)}), "
+                             f"composite={score_data['composite_score']:.2f} - {status}")
+    
+    return sorted(filtered_cves)
 
 def _format_llm_output(cve_data: dict, related_docs_data: dict, all_related_cves: list[str]) -> str:
     """Formats structured data into LLM-optimized output format.
