@@ -6,6 +6,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from mcp.server.fastmcp import FastMCP
 import httpx
+import asyncio
 
 # Configure logging based on DEBUG environment variable
 debug_mode = os.getenv("DEBUG", "false").lower() in ("true", "1", "yes", "on")
@@ -177,7 +178,7 @@ async def _fetch_cwe_data(cwe_id: str) -> dict:
     url = f"https://cwe-api.mitre.org/api/v1/cwe/weakness/{cwe_number}"
     
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(timeout=60.0) as client:
             response = await client.get(url)
             response.raise_for_status()
             cwe_data = response.json()
@@ -262,14 +263,21 @@ async def _fetch_cve_data(cve_id: str, api_key: str) -> dict:
         "cnaAffected", "solutions", "workarounds"
     ]
     url = "https://vulners.com/api/v3/search/id"
-    payload = {"id": cve_id, "fields": cve_fields, "apiKey": api_key}
-    headers = {'Content-Type': 'application/json'}
+    payload = {"id": cve_id, "fields": cve_fields}
+    headers = {
+        'Content-Type': 'application/json',
+        'X-Api-Key': api_key
+    }
 
     try:
-        async with httpx.AsyncClient() as client:
+        timeout = httpx.Timeout(60.0, connect=15.0)  # 60s total, 15s connect
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            logging.debug(f"Making CVE API request for {cve_id} to {url}")
             response = await client.post(url, json=payload, headers=headers)
+            logging.debug(f"CVE API response status: {response.status_code}")
             response.raise_for_status()
             response_data = response.json()
+            logging.debug(f"CVE API response data keys: {list(response_data.keys()) if isinstance(response_data, dict) else 'Not a dict'}")
 
             if 'data' in response_data and 'documents' in response_data['data'] and cve_id in response_data['data']['documents']:
                 cve_data_for_id = response_data['data']['documents'][cve_id]
@@ -424,14 +432,48 @@ async def _fetch_cve_data(cve_id: str, api_key: str) -> dict:
 
                 return cve_data
             else:
-                return {'error': f"Unexpected API response structure for {cve_id}.", 'raw_data': None}
+                error_msg = f"CVE {cve_id} not found or invalid response structure"
+                logging.error(f"CVE API response error: {error_msg}. Response: {response_data}")
+                return {'error': error_msg, 'raw_data': response_data}
 
     except httpx.HTTPStatusError as e:
-        return {'error': f"HTTP {e.response.status_code} - {e.response.text}", 'raw_data': None}
+        # Clean up error messages for common API issues
+        if e.response.status_code == 502:
+            error_details = f"HTTP 502 - Vulners API temporarily unavailable (Bad Gateway). Try again in a few minutes."
+        elif e.response.status_code == 503:
+            error_details = f"HTTP 503 - Vulners API service temporarily unavailable. Try again later."
+        elif e.response.status_code == 504:
+            error_details = f"HTTP 504 - Vulners API gateway timeout. The request took too long to process."
+        elif e.response.status_code == 429:
+            error_details = f"HTTP 429 - Vulners API rate limit exceeded. Wait before making more requests."
+        else:
+            # For other HTTP errors, include limited response text
+            response_text = e.response.text[:200] if e.response.text else "No response body"
+            error_details = f"HTTP {e.response.status_code} - {response_text}"
+        
+        logging.error(f"CVE API HTTP error for {cve_id}: HTTP {e.response.status_code}")
+        return {'error': error_details, 'raw_data': None}
+    except (httpx.TimeoutException, httpx.ReadTimeout, httpx.WriteTimeout, httpx.PoolTimeout, httpx.ConnectTimeout) as e:
+        timeout_type = type(e).__name__
+        if timeout_type == "ReadTimeout":
+            error_details = f"Vulners API read timeout - The server took too long to respond. This may indicate server overload."
+        elif timeout_type == "ConnectTimeout":
+            error_details = f"Vulners API connection timeout - Unable to establish connection within 15 seconds."
+        elif timeout_type == "WriteTimeout":
+            error_details = f"Vulners API write timeout - Request data could not be sent within the timeout period."
+        else:
+            error_details = f"Vulners API timeout ({timeout_type}) - Request exceeded 60 second limit."
+        
+        logging.error(f"CVE API timeout for {cve_id}: {timeout_type} - {str(e)}")
+        return {'error': error_details, 'raw_data': None}
     except httpx.RequestError as e:
-        return {'error': f"Request failed - {e}", 'raw_data': None}
+        error_details = f"Request failed - {type(e).__name__}: {e}"
+        logging.error(f"CVE API request error for {cve_id}: {error_details}")
+        return {'error': error_details, 'raw_data': None}
     except Exception as e:
-        return {'error': f"An unexpected error occurred - {e}", 'raw_data': None}
+        error_details = f"Unexpected error - {type(e).__name__}: {e}"
+        logging.error(f"CVE API unexpected error for {cve_id}: {error_details}")
+        return {'error': error_details, 'raw_data': None}
 
 async def _fetch_related_documents_data(cve_data_json: dict, api_key: str) -> dict:
     """Fetches related documents data from Vulners API and returns structured data without formatting."""
@@ -476,16 +518,22 @@ async def _fetch_related_documents_data(cve_data_json: dict, api_key: str) -> di
             related_doc_fields = ["type", "published", "id", "title", "href", "bulletinFamily", "cvelist", "viewCount", "affectedPackage", "naslFamily", "solution"]
             payload = {
                 "id": combined_ids_from_all_idlists,
-                "fields": related_doc_fields,
-                "apiKey": api_key
+                "fields": related_doc_fields
             }
-            headers = {'Content-Type': 'application/json'}
+            headers = {
+                'Content-Type': 'application/json',
+                'X-Api-Key': api_key
+            }
 
             try:
-                async with httpx.AsyncClient() as client:
+                timeout = httpx.Timeout(60.0, connect=15.0)  # 60s total, 15s connect
+                async with httpx.AsyncClient(timeout=timeout) as client:
+                    logging.debug(f"Making related documents API request to {url}")
                     response = await client.post(url, json=payload, headers=headers)
+                    logging.debug(f"Related documents API response status: {response.status_code}")
                     response.raise_for_status()
                     response_data = response.json()
+                    logging.debug(f"Related documents API response data keys: {list(response_data.keys()) if isinstance(response_data, dict) else 'Not a dict'}")
 
                     if 'data' in response_data and 'documents' in response_data['data']:
                         documents = response_data['data']['documents']
@@ -502,9 +550,17 @@ async def _fetch_related_documents_data(cve_data_json: dict, api_key: str) -> di
                                 filtered_docs = []
                                 for doc_content in doc_list:
                                     cvelist = doc_content.get('cvelist')
-                                    # Only include documents with 5 or fewer CVEs in their cvelist
-                                    if not isinstance(cvelist, list) or len(cvelist) <= 5:
-                                        filtered_docs.append(doc_content)
+                                    bulletin_family = doc_content.get('bulletinFamily', '').lower()
+                                    
+                                    # Apply different CVE limits based on bulletinFamily
+                                    if bulletin_family == 'exploit':
+                                        # For exploits, limit to 5 or fewer CVEs
+                                        if not isinstance(cvelist, list) or len(cvelist) <= 5:
+                                            filtered_docs.append(doc_content)
+                                    else:
+                                        # For other types, limit to 50 or fewer CVEs
+                                        if not isinstance(cvelist, list) or len(cvelist) <= 50:
+                                            filtered_docs.append(doc_content)
                                 
                                 if not filtered_docs:
                                     result['error'] = 'NO_DETAILS_FOUND'
@@ -1153,14 +1209,21 @@ async def _fetch_bulletin_data(bulletin_id: str, api_key: str) -> dict:
         "references", "bulletinFamily", "type", "href"
     ]
     url = "https://vulners.com/api/v3/search/id"
-    payload = {"id": bulletin_id, "fields": bulletin_fields, "apiKey": api_key}
-    headers = {'Content-Type': 'application/json'}
+    payload = {"id": bulletin_id, "fields": bulletin_fields}
+    headers = {
+        'Content-Type': 'application/json',
+        'X-Api-Key': api_key
+    }
 
     try:
-        async with httpx.AsyncClient() as client:
+        timeout = httpx.Timeout(60.0, connect=15.0)  # 60s total, 15s connect
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            logging.debug(f"Making bulletin API request for {bulletin_id} to {url}")
             response = await client.post(url, json=payload, headers=headers)
+            logging.debug(f"Bulletin API response status: {response.status_code}")
             response.raise_for_status()
             response_data = response.json()
+            logging.debug(f"Bulletin API response data keys: {list(response_data.keys()) if isinstance(response_data, dict) else 'Not a dict'}")
 
             if 'data' in response_data and 'documents' in response_data['data'] and bulletin_id in response_data['data']['documents']:
                 bulletin_data_for_id = response_data['data']['documents'][bulletin_id]
@@ -1228,14 +1291,48 @@ async def _fetch_bulletin_data(bulletin_id: str, api_key: str) -> dict:
 
                 return bulletin_data
             else:
-                return {'error': f"Bulletin {bulletin_id} not found in Vulners database.", 'raw_data': None}
+                error_msg = f"Bulletin {bulletin_id} not found in Vulners database"
+                logging.error(f"Bulletin API response error: {error_msg}. Response: {response_data}")
+                return {'error': error_msg, 'raw_data': response_data}
 
     except httpx.HTTPStatusError as e:
-        return {'error': f"HTTP {e.response.status_code} - {e.response.text}", 'raw_data': None}
+        # Clean up error messages for common API issues
+        if e.response.status_code == 502:
+            error_details = f"HTTP 502 - Vulners API temporarily unavailable (Bad Gateway). Try again in a few minutes."
+        elif e.response.status_code == 503:
+            error_details = f"HTTP 503 - Vulners API service temporarily unavailable. Try again later."
+        elif e.response.status_code == 504:
+            error_details = f"HTTP 504 - Vulners API gateway timeout. The request took too long to process."
+        elif e.response.status_code == 429:
+            error_details = f"HTTP 429 - Vulners API rate limit exceeded. Wait before making more requests."
+        else:
+            # For other HTTP errors, include limited response text
+            response_text = e.response.text[:200] if e.response.text else "No response body"
+            error_details = f"HTTP {e.response.status_code} - {response_text}"
+        
+        logging.error(f"Bulletin API HTTP error for {bulletin_id}: HTTP {e.response.status_code}")
+        return {'error': error_details, 'raw_data': None}
+    except (httpx.TimeoutException, httpx.ReadTimeout, httpx.WriteTimeout, httpx.PoolTimeout, httpx.ConnectTimeout) as e:
+        timeout_type = type(e).__name__
+        if timeout_type == "ReadTimeout":
+            error_details = f"Vulners API read timeout - The server took too long to respond. This may indicate server overload."
+        elif timeout_type == "ConnectTimeout":
+            error_details = f"Vulners API connection timeout - Unable to establish connection within 15 seconds."
+        elif timeout_type == "WriteTimeout":
+            error_details = f"Vulners API write timeout - Request data could not be sent within the timeout period."
+        else:
+            error_details = f"Vulners API timeout ({timeout_type}) - Request exceeded 60 second limit."
+        
+        logging.error(f"Bulletin API timeout for {bulletin_id}: {timeout_type} - {str(e)}")
+        return {'error': error_details, 'raw_data': None}
     except httpx.RequestError as e:
-        return {'error': f"Request failed - {e}", 'raw_data': None}
+        error_details = f"Request failed - {type(e).__name__}: {e}"
+        logging.error(f"Bulletin API request error for {bulletin_id}: {error_details}")
+        return {'error': error_details, 'raw_data': None}
     except Exception as e:
-        return {'error': f"An unexpected error occurred - {e}", 'raw_data': None}
+        error_details = f"Unexpected error - {type(e).__name__}: {e}"
+        logging.error(f"Bulletin API unexpected error for {bulletin_id}: {error_details}")
+        return {'error': error_details, 'raw_data': None}
 
 
 def _format_bulletin_output(bulletin_data: dict) -> str:
@@ -1281,6 +1378,25 @@ def _format_bulletin_output(bulletin_data: dict) -> str:
     
     return "\n\n".join(output_sections)
 
+def _validate_bulletin_id(bulletin_id: str) -> tuple[bool, str]:
+    """Validates bulletin ID format and returns (is_valid, error_message)."""
+    if not bulletin_id or not isinstance(bulletin_id, str):
+        return False, "Bulletin ID must be a non-empty string"
+    
+    # Only reject obvious non-bulletin-IDs: URLs and CVE IDs
+    # Keep validation minimal since bulletin IDs come in many formats from different vendors
+    
+    # Reject URLs - these are clearly not bulletin IDs
+    if bulletin_id.startswith(('http://', 'https://')):
+        return False, f"Invalid bulletin ID: {bulletin_id}. URLs are not bulletin IDs. Use only bulletin identifiers that appear in CVE search results [RELATED_DOCUMENTS] section."
+    
+    # Reject CVE IDs - these are vulnerability IDs, not bulletin IDs
+    if bulletin_id.startswith('CVE-'):
+        return False, f"Invalid bulletin ID: {bulletin_id}. CVE IDs are not bulletin IDs. Use only bulletin identifiers that appear in CVE search results [RELATED_DOCUMENTS] section."
+    
+    # Accept everything else - bulletin IDs come in many formats from different vendors
+    # The real validation is that they must come from CVE search results
+    return True, ""
 
 def _get_vulners_bulletin_tool_description() -> str:
     """Returns the detailed description for the vulners_bulletin_info tool."""
@@ -1425,19 +1541,32 @@ The analysis report MUST cover:
 async def vulners_cve_info(cve_id: str) -> str:
     """Retrieve comprehensive vulnerability intelligence using clean separation of data fetching and formatting."""
 
+    logging.info(f"Starting CVE analysis for: {cve_id}")
     logging.debug(f"Fetching detailed information from Vulners API for: {cve_id}")
 
     api_key = os.getenv("VULNERS_API_KEY")
 
     if not api_key:
-        logging.warning("VULNERS_API_KEY not found. Please set it.")
-        return "Error: VULNERS_API_KEY not configured."
+        error_msg = "VULNERS_API_KEY not configured"
+        logging.error(f"CVE {cve_id} failed: {error_msg}")
+        return f"Error: {error_msg}. Please set VULNERS_API_KEY environment variable."
+    
+    # Validate CVE format
+    if not re.match(r'^CVE-\d{4}-\d{4,}$', cve_id, re.IGNORECASE):
+        error_msg = f"Invalid CVE format: {cve_id}. Expected format: CVE-YYYY-NNNN"
+        logging.error(f"CVE format validation failed: {error_msg}")
+        return f"Error: {error_msg}"
 
     # Step 1: Fetch CVE data
+    logging.debug(f"Step 1: Fetching CVE data for {cve_id}")
     cve_data = await _fetch_cve_data(cve_id, api_key)
     
     if cve_data.get('error'):
-        return f"Error: {cve_data['error']}"
+        error_msg = cve_data['error']
+        logging.error(f"CVE {cve_id} data fetch failed: {error_msg}")
+        return f"Error: {error_msg}"
+    
+    logging.info(f"CVE {cve_id} data fetch successful")
 
     # Step 2: Fetch related documents data
     related_docs_data = {'error': None, 'documents': [], 'related_cves': [], 'cve_titles': {}}
@@ -1474,6 +1603,7 @@ async def vulners_cve_info(cve_id: str) -> str:
 async def vulners_bulletin_info(bulletin_id: str) -> str:
     """Retrieve comprehensive vulnerability intelligence for any security bulletin ID from the Vulners database."""
 
+    logging.info(f"Starting bulletin analysis for: {bulletin_id}")
     logging.debug(f"Fetching detailed information from Vulners API for bulletin: {bulletin_id}")
 
     api_key = os.getenv("VULNERS_API_KEY")
@@ -1481,6 +1611,12 @@ async def vulners_bulletin_info(bulletin_id: str) -> str:
     if not api_key:
         logging.warning("VULNERS_API_KEY not found. Please set it.")
         return "Error: VULNERS_API_KEY not configured."
+    
+    # Validate bulletin ID format
+    is_valid, error_msg = _validate_bulletin_id(bulletin_id)
+    if not is_valid:
+        logging.error(f"Bulletin ID validation failed: {error_msg}")
+        return f"Error: {error_msg}"
 
     # Fetch bulletin data
     bulletin_data = await _fetch_bulletin_data(bulletin_id, api_key)
