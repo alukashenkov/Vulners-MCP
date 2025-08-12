@@ -42,7 +42,7 @@ def _save_debug_output(bulletin_id: str, output: str) -> None:
         
         # Write output to file
         with open(file_path, 'w', encoding='utf-8') as f:
-            f.write(f"Bulletin ID: {bulletin_id}\n")
+            f.write(f"ID: {bulletin_id}\n")
             f.write("=" * 50 + "\n\n")
             f.write(output)
         
@@ -508,160 +508,196 @@ async def _fetch_related_documents_data(cve_data_json: dict, api_key: str) -> di
                                               if not any(unwanted in str(id_val).lower() 
                                                         for unwanted in ['nvd', 'cvelist', 'vulnrichment'])]
                                 combined_ids_from_all_idlists.extend(filtered_ids)
-            
-            if not combined_ids_from_all_idlists:
-                result['error'] = 'NO_RELEVANT_IDS'
+                                logging.debug(f"Added {len(filtered_ids)} IDs from {item.get('type', 'unknown')} references (total so far: {len(combined_ids_from_all_idlists)})")
+            else:
+                result['error'] = 'NO_REFERENCES_LIST'
                 return result
-
-            # API Call to Vulners ID endpoint for combined_ids_from_all_idlists
-            url = "https://vulners.com/api/v3/search/id"
-            related_doc_fields = ["type", "published", "id", "title", "href", "bulletinFamily", "cvelist", "viewCount", "affectedPackage", "naslFamily", "solution"]
-            payload = {
-                "id": combined_ids_from_all_idlists,
-                "fields": related_doc_fields
-            }
-            headers = {
-                'Content-Type': 'application/json',
-                'X-Api-Key': api_key
-            }
-
-            try:
-                timeout = httpx.Timeout(60.0, connect=15.0)  # 60s total, 15s connect
-                async with httpx.AsyncClient(timeout=timeout) as client:
-                    logging.debug(f"Making related documents API request to {url}")
-                    response = await client.post(url, json=payload, headers=headers)
-                    logging.debug(f"Related documents API response status: {response.status_code}")
-                    response.raise_for_status()
-                    response_data = response.json()
-                    logging.debug(f"Related documents API response data keys: {list(response_data.keys()) if isinstance(response_data, dict) else 'Not a dict'}")
-
-                    if 'data' in response_data and 'documents' in response_data['data']:
-                        documents = response_data['data']['documents']
-                        
-                        if isinstance(documents, dict):
-                            doc_list = [doc for doc in documents.values() if isinstance(doc, dict)]
-                            doc_list.sort(key=lambda x: x.get('published', ''))
-
-                            if not doc_list:
-                                result['error'] = 'NO_DETAILS_FOUND'
-                                return result
-                            else:
-                                # Filter documents first based on CVE count, then process
-                                filtered_docs = []
-                                for doc_content in doc_list:
-                                    cvelist = doc_content.get('cvelist')
-                                    bulletin_family = doc_content.get('bulletinFamily', '').lower()
-                                    
-                                    # Apply different CVE limits based on bulletinFamily
-                                    if bulletin_family == 'exploit':
-                                        # For exploits, limit to 5 or fewer CVEs
-                                        if not isinstance(cvelist, list) or len(cvelist) <= 5:
-                                            filtered_docs.append(doc_content)
-                                    else:
-                                        # For other types, limit to 50 or fewer CVEs
-                                        if not isinstance(cvelist, list) or len(cvelist) <= 50:
-                                            filtered_docs.append(doc_content)
-                                
-                                if not filtered_docs:
-                                    result['error'] = 'NO_DETAILS_FOUND'
-                                    return result
-                                
-                                result['document_count'] = len(filtered_docs)
-                                for doc_content in filtered_docs:
-                                    doc_entry = {
-                                        'id': doc_content.get('id', 'N/A'),
-                                        'type': doc_content.get('bulletinFamily', 'N/A'),
-                                        'title': doc_content.get('title', 'N/A'),
-                                        'link': doc_content.get('href', 'N/A'),
-                                        'published': doc_content.get('published', 'N/A'),
-                                        'view_count': doc_content.get('viewCount', 'N/A')
-                                    }
-                                    result['documents'].append(doc_entry)
-                                    
-                                    cvelist = doc_content.get('cvelist')
-                                    if isinstance(cvelist, list):
-                                        doc_id = doc_content.get('id', 'unknown')
-                                        doc_type = doc_content.get('bulletinFamily', doc_content.get('type', 'unknown'))
-                                        
-                                        # Add CVEs to the main list and track their sources
-                                        for cve in cvelist:
-                                            if isinstance(cve, str):
-                                                cve_upper = cve.upper()
-                                                result['related_cves'].append(cve_upper)
-                                                
-                                                # Track which document mentioned this CVE
-                                                if cve_upper not in result['cve_source_tracking']:
-                                                    result['cve_source_tracking'][cve_upper] = []
-                                                
-                                                result['cve_source_tracking'][cve_upper].append({
-                                                    'doc_id': doc_id,
-                                                    'doc_type': doc_type,
-                                                    'view_count': doc_content.get('viewCount', 0)
-                                                })
-                                    
-                                    # Process affected packages - track OS/version and document references
-                                    affected_packages = doc_content.get('affectedPackage')
-                                    if isinstance(affected_packages, list):
-                                        doc_href = doc_content.get('href', 'N/A')
-                                        doc_id = doc_content.get('id', 'N/A')
-                                        doc_type = doc_content.get('type', 'unknown')
-                                        
-                                        # Track unique OS/version combinations in this document
-                                        os_versions_in_doc = set()
-                                        
-                                        for package in affected_packages:
-                                            if isinstance(package, dict):
-                                                os_name = package.get('OS', '')
-                                                os_version = package.get('OSVersion', '')
-                                                
-                                                if os_name and os_version:
-                                                    os_key = f"{os_name} {os_version}"
-                                                    os_versions_in_doc.add(os_key)
-                                        
-                                        # Add document reference for each OS/version found
-                                        for os_key in os_versions_in_doc:
-                                            if os_key not in result['affected_os_by_document']:
-                                                result['affected_os_by_document'][os_key] = []
-                                            
-                                            # Store document reference info with type for sorting
-                                            doc_ref = {
-                                                'id': doc_id,
-                                                'href': doc_href,
-                                                'type': doc_type
-                                            }
-                                            result['affected_os_by_document'][os_key].append(doc_ref)
-                                    
-                                    # Process external source solutions - extract category and solution pairs
-                                    doc_type = doc_content.get('type', '').lower()
-                                    if doc_type == 'nessus':
-                                        nessus_family = doc_content.get('naslFamily', '').strip()
-                                        solution = doc_content.get('solution', '').strip()
-                                        
-                                        if nessus_family and solution:
-                                            # Normalize the source category for consistent grouping
-                                            nessus_family = ' '.join(nessus_family.split())
-                                            solution = ' '.join(solution.split())
-                                            
-                                            if nessus_family not in result['solutions']:
-                                                result['solutions'][nessus_family] = set()
-                                            
-                                            # Add solution to the set (automatically deduplicates)
-                                            result['solutions'][nessus_family].add(solution)
-                        else:
-                            result['error'] = 'NO_DOCUMENT_DETAILS'
-                    else:
-                        result['error'] = 'API_ERROR_UNEXPECTED_RESPONSE_STRUCTURE'
+        else:
+            result['error'] = 'NO_DEPENDENCIES'
+            return result
+    else:
+        result['error'] = 'NO_ENCHANTMENTS'
+        return result
             
-            except httpx.HTTPStatusError as e:
-                result['error'] = f"HTTP_ERROR_{e.response.status_code}"
-            except httpx.RequestError as e:
-                result['error'] = f"REQUEST_ERROR_{str(e)}"
-            except json.JSONDecodeError:
-                result['error'] = 'JSON_DECODE_ERROR'
-            except KeyError as e:
-                result['error'] = f"KEY_ERROR_{str(e)}"
-            except Exception as e:
-                result['error'] = f"UNEXPECTED_ERROR_{str(e)}"
+    if not combined_ids_from_all_idlists:
+        result['error'] = 'NO_RELEVANT_IDS'
+        return result
+
+    # Process IDs in chunks to avoid API limits (Vulners API has ~100 ID limit)
+    chunk_size = 100
+    all_documents = {}
+    
+    logging.debug(f"Processing {len(combined_ids_from_all_idlists)} related document IDs in chunks of {chunk_size}")
+    
+    for i in range(0, len(combined_ids_from_all_idlists), chunk_size):
+        chunk = combined_ids_from_all_idlists[i:i + chunk_size]
+        logging.debug(f"Processing chunk {i//chunk_size + 1}/{(len(combined_ids_from_all_idlists) + chunk_size - 1)//chunk_size} with {len(chunk)} IDs")
+        
+        # API Call to Vulners ID endpoint for each chunk
+        url = "https://vulners.com/api/v3/search/id"
+        related_doc_fields = ["type", "published", "id", "title", "href", "bulletinFamily", "cvelist", "viewCount", "affectedPackage", "naslFamily", "solution"]
+        payload = {
+            "id": chunk,
+            "fields": related_doc_fields
+        }
+        headers = {
+            'Content-Type': 'application/json',
+            'X-Api-Key': api_key
+        }
+
+        try:
+            timeout = httpx.Timeout(60.0, connect=15.0)  # 60s total, 15s connect
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                logging.debug(f"Making related documents API request to {url} for chunk {i//chunk_size + 1}")
+                response = await client.post(url, json=payload, headers=headers)
+                logging.debug(f"Related documents API response status: {response.status_code}")
+                response.raise_for_status()
+                response_data = response.json()
+                logging.debug(f"Related documents API response data keys: {list(response_data.keys()) if isinstance(response_data, dict) else 'Not a dict'}")
+
+                if 'data' in response_data and 'documents' in response_data['data']:
+                    documents = response_data['data']['documents']
+                    
+                    if isinstance(documents, dict):
+                        # Merge documents from this chunk into the overall collection
+                        all_documents.update(documents)
+                        logging.debug(f"Added {len(documents)} documents from chunk {i//chunk_size + 1}, total: {len(all_documents)}")
+                
+        except httpx.HTTPStatusError as e:
+            logging.error(f"HTTP error for chunk {i//chunk_size + 1}: HTTP {e.response.status_code}")
+            result['error'] = f"HTTP_ERROR_{e.response.status_code}"
+            return result
+        except httpx.RequestError as e:
+            logging.error(f"Request error for chunk {i//chunk_size + 1}: {str(e)}")
+            result['error'] = f"REQUEST_ERROR_{str(e)}"
+            return result
+        except json.JSONDecodeError:
+            logging.error(f"JSON decode error for chunk {i//chunk_size + 1}")
+            result['error'] = 'JSON_DECODE_ERROR'
+            return result
+        except KeyError as e:
+            logging.error(f"Key error for chunk {i//chunk_size + 1}: {str(e)}")
+            result['error'] = f"KEY_ERROR_{str(e)}"
+            return result
+        except Exception as e:
+            logging.error(f"Unexpected error for chunk {i//chunk_size + 1}: {str(e)}")
+            result['error'] = f"UNEXPECTED_ERROR_{str(e)}"
+            return result
+
+    # Process all collected documents
+    if all_documents:
+        doc_list = [doc for doc in all_documents.values() if isinstance(doc, dict)]
+        doc_list.sort(key=lambda x: x.get('published', ''))
+
+        if not doc_list:
+            result['error'] = 'NO_DETAILS_FOUND'
+            return result
+        else:
+            # Filter documents first based on CVE count, then process
+            filtered_docs = []
+            for doc_content in doc_list:
+                cvelist = doc_content.get('cvelist')
+                bulletin_family = doc_content.get('bulletinFamily', '').lower()
+                
+                # Apply different CVE limits based on bulletinFamily
+                if bulletin_family == 'exploit':
+                    # For exploits, limit to 5 or fewer CVEs
+                    if not isinstance(cvelist, list) or len(cvelist) <= 5:
+                        filtered_docs.append(doc_content)
+                else:
+                    # For other types, limit to 50 or fewer CVEs
+                    if not isinstance(cvelist, list) or len(cvelist) <= 50:
+                        filtered_docs.append(doc_content)
+            
+            if not filtered_docs:
+                result['error'] = 'NO_DETAILS_FOUND'
+                return result
+            
+            result['document_count'] = len(filtered_docs)
+            logging.info(f"Successfully processed {len(filtered_docs)} related documents from {len(all_documents)} total documents")
+            
+            for doc_content in filtered_docs:
+                doc_entry = {
+                    'id': doc_content.get('id', 'N/A'),
+                    'type': doc_content.get('bulletinFamily', 'N/A'),
+                    'title': doc_content.get('title', 'N/A'),
+                    'link': doc_content.get('href', 'N/A'),
+                    'published': doc_content.get('published', 'N/A'),
+                    'view_count': doc_content.get('viewCount', 'N/A')
+                }
+                result['documents'].append(doc_entry)
+                
+                cvelist = doc_content.get('cvelist')
+                if isinstance(cvelist, list):
+                    doc_id = doc_content.get('id', 'unknown')
+                    doc_type = doc_content.get('bulletinFamily', doc_content.get('type', 'unknown'))
+                    
+                    # Add CVEs to the main list and track their sources
+                    for cve in cvelist:
+                        if isinstance(cve, str):
+                            cve_upper = cve.upper()
+                            result['related_cves'].append(cve_upper)
+                            
+                            # Track which document mentioned this CVE
+                            if cve_upper not in result['cve_source_tracking']:
+                                result['cve_source_tracking'][cve_upper] = []
+                            
+                            result['cve_source_tracking'][cve_upper].append({
+                                'doc_id': doc_id,
+                                'doc_type': doc_type,
+                                'view_count': doc_content.get('viewCount', 0)
+                            })
+                
+                # Process affected packages - track OS/version and document references
+                affected_packages = doc_content.get('affectedPackage')
+                if isinstance(affected_packages, list):
+                    doc_href = doc_content.get('href', 'N/A')
+                    doc_id = doc_content.get('id', 'N/A')
+                    doc_type = doc_content.get('type', 'unknown')
+                    
+                    # Track unique OS/version combinations in this document
+                    os_versions_in_doc = set()
+                    
+                    for package in affected_packages:
+                        if isinstance(package, dict):
+                            os_name = package.get('OS', '')
+                            os_version = package.get('OSVersion', '')
+                            
+                            if os_name and os_version:
+                                os_key = f"{os_name} {os_version}"
+                                os_versions_in_doc.add(os_key)
+                    
+                    # Add document reference for each OS/version found
+                    for os_key in os_versions_in_doc:
+                        if os_key not in result['affected_os_by_document']:
+                            result['affected_os_by_document'][os_key] = []
+                        
+                        # Store document reference info with type for sorting
+                        doc_ref = {
+                            'id': doc_id,
+                            'href': doc_href,
+                            'type': doc_type
+                        }
+                        result['affected_os_by_document'][os_key].append(doc_ref)
+                
+                # Process external source solutions - extract category and solution pairs
+                doc_type = doc_content.get('type', '').lower()
+                if doc_type == 'nessus':
+                    nessus_family = doc_content.get('naslFamily', '').strip()
+                    solution = doc_content.get('solution', '').strip()
+                    
+                    if nessus_family and solution:
+                        # Normalize the source category for consistent grouping
+                        nessus_family = ' '.join(nessus_family.split())
+                        solution = ' '.join(solution.split())
+                        
+                        if nessus_family not in result['solutions']:
+                            result['solutions'][nessus_family] = set()
+                        
+                        # Add solution to the set (automatically deduplicates)
+                        result['solutions'][nessus_family].add(solution)
+    else:
+        result['error'] = 'NO_DOCUMENT_DETAILS'
 
     # Apply intelligent CVE filtering based on frequency and evidence strength
     result['related_cves'] = _filter_cves_by_frequency(result['related_cves'], result['cve_source_tracking'])
@@ -818,6 +854,73 @@ def _filter_cves_by_frequency(related_cves: list, cve_source_tracking: dict) -> 
     
     return sorted(filtered_cves)
 
+def _clean_text_for_llm(text: str) -> str:
+    """Cleans and normalizes text for optimal LLM readability.
+    
+    Handles various formatting issues while preserving meaningful structure:
+    - Removes excessive whitespace and normalizes spacing
+    - Handles awkward line breaks and wrapping
+    - Fixes broken quote formatting patterns
+    - Normalizes technical identifiers
+    - Preserves paragraph structure where meaningful
+    """
+    if not isinstance(text, str) or not text.strip():
+        return text
+    
+    # Step 1: Handle specific broken quote patterns first
+    # Fix the pattern like 'text "     " text' which should be 'text that text'
+    cleaned = re.sub(r'"[\s]+?"', ' that ', text)
+    
+    # Step 2: Normalize line endings and handle wrapped lines
+    # Replace various line ending combinations with single spaces initially
+    cleaned = re.sub(r'\r\n|\r|\n', ' ', cleaned)
+    
+    # Step 3: Handle excessive whitespace
+    # Replace multiple spaces/tabs with single space
+    cleaned = re.sub(r'[ \t]+', ' ', cleaned)
+    
+    # Step 4: Handle awkward spacing around punctuation
+    # Fix spacing before punctuation
+    cleaned = re.sub(r'\s+([,.;:!?])', r'\1', cleaned)
+    # Ensure space after punctuation (but not in URLs or version numbers)
+    cleaned = re.sub(r'([,.;:!?])(?=[A-Za-z])', r'\1 ', cleaned)
+    
+    # Step 5: Handle quoted text formatting issues
+    # Normalize various quote types and fix spacing
+    cleaned = re.sub(r'[""\u201c\u201d]+', '"', cleaned)
+    cleaned = re.sub(r"[''\u2018\u2019]+", "'", cleaned)
+    # Fix spacing around quotes - but avoid empty quotes
+    cleaned = re.sub(r'\s*"([^"]+?)"\s*', r' "\1" ', cleaned)
+    # Remove empty quotes that might be left over
+    cleaned = re.sub(r'\s*""\s*', ' ', cleaned)
+    
+    # Step 6: Handle sentence structure
+    # Ensure proper spacing after sentence endings
+    cleaned = re.sub(r'\.(?=[A-Z])', '. ', cleaned)
+    
+    # Step 7: Handle common CVE/technical text patterns
+    # Fix spacing around technical identifiers (CVE, CWE, etc.)
+    cleaned = re.sub(r'\b(CVE|CWE|CAPEC|KB|MS|RHSA|DSA|USN|ALSA|ELSA|SUSE-SU)\s*-\s*(\d+)', r'\1-\2', cleaned)
+    # Fix pattern like "CVE - 2025 - 53770" to "CVE-2025-53770"
+    cleaned = re.sub(r'\b(CVE|CWE|CAPEC)\s*-\s*(\d{4})\s*-\s*(\d+)', r'\1-\2-\3', cleaned)
+    
+    # Step 8: Handle paragraph breaks for long text
+    # For very long descriptions, try to preserve meaningful paragraph breaks
+    if len(cleaned) > 500:
+        # Look for patterns that suggest paragraph breaks
+        # Sentences ending with periods followed by capital letters might indicate new paragraphs
+        cleaned = re.sub(r'\.(\s+)([A-Z][a-z]+(?:\s+[a-z]+)*\s+(?:is|are|has|have|will|can|may|must|should|would|could)\b)', r'.\n\n\2', cleaned)
+        # Handle Microsoft/Apple style advisory formatting
+        cleaned = re.sub(r'\.(\s+)(Microsoft|Apple|Google|Adobe|Oracle|Red Hat|SUSE|Ubuntu|Debian)\s+(?:is\s+)?(?:aware|preparing|has\s+released)', r'.\n\n\2', cleaned)
+    
+    # Step 9: Final cleanup
+    # Remove leading/trailing whitespace
+    cleaned = cleaned.strip()
+    # Ensure no double spaces remain
+    cleaned = re.sub(r'  +', ' ', cleaned)
+    
+    return cleaned
+
 def _format_llm_output(cve_data: dict, related_docs_data: dict, all_related_cves: list[str]) -> str:
     """Formats structured data into LLM-optimized output format.
     
@@ -836,7 +939,9 @@ def _format_llm_output(cve_data: dict, related_docs_data: dict, all_related_cves
     core_section += f"ID={core_info['id']}\n"
     core_section += f"PUBLISHED={core_info['published']}\n"
     
-    core_section += f"DESCRIPTION={core_info['description']}"
+    # Clean the description for better LLM readability
+    description = _clean_text_for_llm(core_info['description'])
+    core_section += f"DESCRIPTION={description}"
     output_sections.append(core_section)
     
     # CVSS metrics - only if data exists
@@ -1046,10 +1151,12 @@ def _format_llm_output(cve_data: dict, related_docs_data: dict, all_related_cves
         doc_section = f"[RELATED_DOCUMENTS]\nDOCUMENT_COUNT={related_docs_data['document_count']}\n"
         doc_lines = []
         for doc in related_docs_data['documents']:
+            # Clean document title for better readability
+            cleaned_title = _clean_text_for_llm(doc['title'])
             doc_line = (
                 f"ID={doc['id']}|"
                 f"TYPE={doc['type']}|"
-                f"TITLE={doc['title']}|"
+                f"TITLE={cleaned_title}|"
                 f"PUBLISHED={doc['published']}|"
                 f"VIEW_COUNT={doc['view_count']}|"
                 f"LINK={doc['link']}"
@@ -1068,7 +1175,10 @@ def _format_llm_output(cve_data: dict, related_docs_data: dict, all_related_cves
     
     # Add CVE solutions first
     if cve_data.get('solutions'):
-        all_solutions.extend(cve_data['solutions'])
+        for solution in cve_data['solutions']:
+            # Clean solution text for better readability
+            cleaned_solution = _clean_text_for_llm(solution)
+            all_solutions.append(cleaned_solution)
     
     # Add all external source solutions
     if related_docs_data.get('solutions'):
@@ -1079,7 +1189,9 @@ def _format_llm_output(cve_data: dict, related_docs_data: dict, all_related_cves
                 # Add all solutions from this category with family prefix (sorted for consistency)
                 sorted_solutions = sorted(list(unique_solutions))
                 for solution in sorted_solutions:
-                    prefixed_solution = f"{source_category}: {solution}"
+                    # Clean solution text for better readability
+                    cleaned_solution = _clean_text_for_llm(solution)
+                    prefixed_solution = f"{source_category}: {cleaned_solution}"
                     all_solutions.append(prefixed_solution)
     
     # Output combined solutions if any exist
@@ -1096,7 +1208,9 @@ def _format_llm_output(cve_data: dict, related_docs_data: dict, all_related_cves
         workaround_section = f"[WORKAROUNDS]\nCOUNT={len(cve_data['workarounds'])}\n"
         workaround_lines = []
         for i, workaround in enumerate(cve_data['workarounds'], 1):
-            workaround_lines.append(f"WORKAROUND_{i}={workaround}")
+            # Clean workaround text for better readability
+            cleaned_workaround = _clean_text_for_llm(workaround)
+            workaround_lines.append(f"WORKAROUND_{i}={cleaned_workaround}")
         workaround_section += '\n'.join(workaround_lines)
         output_sections.append(workaround_section)
     
@@ -1352,13 +1466,17 @@ def _format_bulletin_output(bulletin_data: dict) -> str:
     core_section = "[CORE_BULLETIN_INFO]\n"
     core_section += f"ID={core_info['id']}\n"
     if core_info.get('title') and core_info['title'] != 'N/A':
-        core_section += f"TITLE={core_info['title']}\n"
+        # Clean title text for better readability
+        title = _clean_text_for_llm(core_info['title'])
+        core_section += f"TITLE={title}\n"
     core_section += f"TYPE={core_info['type']}\n"
     core_section += f"PUBLISHED={core_info['published']}\n"
     if core_info.get('href') and core_info['href'] != 'N/A':
         core_section += f"LINK={core_info['href']}\n"
     
-    core_section += f"DESCRIPTION={core_info['description']}"
+    # Clean description text for better readability
+    description = _clean_text_for_llm(core_info['description'])
+    core_section += f"DESCRIPTION={description}"
     output_sections.append(core_section)
     
     # References - only if data exists
