@@ -1059,6 +1059,11 @@ def _format_llm_output(cve_data: dict, related_docs_data: dict, all_related_cves
         if exploit.get('sources'):
             exploit_line += f"|SOURCES={','.join(exploit['sources'])}"
         
+        # Add Shadowserver items if available
+        if cve_data.get('shadowserver_items'):
+            for item in cve_data['shadowserver_items']:
+                exploit_line += f"\n{item['source']}"
+        
         exploit_section = f"[EXPLOITATION_STATUS]\n{exploit_line}"
         output_sections.append(exploit_section)
     
@@ -1146,25 +1151,6 @@ def _format_llm_output(cve_data: dict, related_docs_data: dict, all_related_cves
         affected_section = f"[AFFECTED_PRODUCTS]\nCOUNT={len(affected_products_list)}\nPRODUCTS_LIST={' | '.join(affected_products_list)}"
         output_sections.append(affected_section)
     
-    # Related documents - only if meaningful data exists
-    if related_docs_data.get('documents'):
-        doc_section = f"[RELATED_DOCUMENTS]\nDOCUMENT_COUNT={related_docs_data['document_count']}\n"
-        doc_lines = []
-        for doc in related_docs_data['documents']:
-            # Clean document title for better readability
-            cleaned_title = _clean_text_for_llm(doc['title'])
-            doc_line = (
-                f"ID={doc['id']}|"
-                f"TYPE={doc['type']}|"
-                f"TITLE={cleaned_title}|"
-                f"PUBLISHED={doc['published']}|"
-                f"VIEW_COUNT={doc['view_count']}|"
-                f"LINK={doc['link']}"
-            )
-            doc_lines.append(doc_line)
-        doc_section += '\n'.join(doc_lines)
-        output_sections.append(doc_section)
-    
     # Related CVEs - only if data exists
     if all_related_cves:
         cve_section = f"[RELATED_CVES]\nCOUNT={len(all_related_cves)}\nCVE_LIST={','.join(sorted(all_related_cves))}"
@@ -1213,6 +1199,25 @@ def _format_llm_output(cve_data: dict, related_docs_data: dict, all_related_cves
             workaround_lines.append(f"WORKAROUND_{i}={cleaned_workaround}")
         workaround_section += '\n'.join(workaround_lines)
         output_sections.append(workaround_section)
+    
+    # Related documents - only if meaningful data exists (moved to end)
+    if related_docs_data.get('documents'):
+        doc_section = f"[RELATED_DOCUMENTS]\nDOCUMENT_COUNT={related_docs_data['document_count']}\n"
+        doc_lines = []
+        for doc in related_docs_data['documents']:
+            # Clean document title for better readability
+            cleaned_title = _clean_text_for_llm(doc['title'])
+            doc_line = (
+                f"ID={doc['id']}|"
+                f"TYPE={doc['type']}|"
+                f"TITLE={cleaned_title}|"
+                f"PUBLISHED={doc['published']}|"
+                f"VIEW_COUNT={doc['view_count']}|"
+                f"LINK={doc['link']}"
+            )
+            doc_lines.append(doc_line)
+        doc_section += '\n'.join(doc_lines)
+        output_sections.append(doc_section)
     
     # Join all sections with double newlines for clear separation
     return '\n\n'.join(output_sections)
@@ -1447,6 +1452,73 @@ async def _fetch_bulletin_data(bulletin_id: str, api_key: str) -> dict:
         error_details = f"Unexpected error - {type(e).__name__}: {e}"
         logging.error(f"Bulletin API unexpected error for {bulletin_id}: {error_details}")
         return {'error': error_details, 'raw_data': None}
+
+
+async def _fetch_circl_document_data(cve_id: str, api_key: str) -> dict:
+    """Fetches CIRCL document data for a given CVE ID and extracts Shadowserver information."""
+    
+    # Construct CIRCL document ID
+    circl_doc_id = f"CIRCL:{cve_id}"
+    
+    url = "https://vulners.com/api/v3/search/id"
+    payload = {"id": circl_doc_id, "fields": ["items", "id", "title"]}
+    headers = {
+        'Content-Type': 'application/json',
+        'X-Api-Key': api_key
+    }
+
+    try:
+        timeout = httpx.Timeout(60.0, connect=15.0)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            logging.debug(f"Making CIRCL document API request for {circl_doc_id}")
+            response = await client.post(url, json=payload, headers=headers)
+            logging.debug(f"CIRCL document API response status: {response.status_code}")
+            response.raise_for_status()
+            response_data = response.json()
+            
+            if 'data' in response_data and 'documents' in response_data['data'] and circl_doc_id in response_data['data']['documents']:
+                circl_data = response_data['data']['documents'][circl_doc_id]
+                
+                # Extract Shadowserver items
+                shadowserver_items = []
+                if 'items' in circl_data and isinstance(circl_data['items'], list):
+                    for item in circl_data['items']:
+                        if isinstance(item, dict):
+                            source = item.get('source', '')
+                            if source.startswith('The Shadowserver'):
+                                # Extract creation timestamp and source
+                                creation_timestamp = item.get('creation_timestamp', '')
+                                shadowserver_items.append({
+                                    'source': source,
+                                    'creation_timestamp': creation_timestamp
+                                })
+                
+                # Sort by creation timestamp (oldest to newest)
+                shadowserver_items.sort(key=lambda x: x.get('creation_timestamp', ''))
+                
+                return {
+                    'shadowserver_items': shadowserver_items,
+                    'error': None
+                }
+            else:
+                logging.debug(f"CIRCL document {circl_doc_id} not found")
+                return {
+                    'shadowserver_items': [],
+                    'error': None
+                }
+
+    except httpx.HTTPStatusError as e:
+        logging.error(f"HTTP error fetching CIRCL document {circl_doc_id}: HTTP {e.response.status_code}")
+        return {
+            'shadowserver_items': [],
+            'error': f"HTTP_ERROR_{e.response.status_code}"
+        }
+    except Exception as e:
+        logging.error(f"Error fetching CIRCL document {circl_doc_id}: {str(e)}")
+        return {
+            'shadowserver_items': [],
+            'error': f"FETCH_ERROR_{str(e)}"
+        }
 
 
 def _format_bulletin_output(bulletin_data: dict) -> str:
@@ -1704,15 +1776,22 @@ async def vulners_cve_info(cve_id: str) -> str:
     if cwe_consequences_data:
         cve_data['cwe_consequences'] = cwe_consequences_data
 
-    # Step 4: Combine all CVE IDs
+    # Step 4: Fetch CIRCL document data for Shadowserver information
+    logging.debug(f"Step 4: Fetching CIRCL document data for {cve_id}")
+    circl_data = await _fetch_circl_document_data(cve_id, api_key)
+    if circl_data.get('shadowserver_items'):
+        cve_data['shadowserver_items'] = circl_data['shadowserver_items']
+        logging.debug(f"Found {len(circl_data['shadowserver_items'])} Shadowserver items for {cve_id}")
+
+    # Step 5: Combine all CVE IDs
     all_related_cves = set(cve_data.get('cvelist', []))
     all_related_cves.update(related_docs_data.get('related_cves', []))
     all_related_cves = list(all_related_cves)
 
-    # Step 5: Format output for LLM consumption
+    # Step 6: Format output for LLM consumption
     formatted_output = _format_llm_output(cve_data, related_docs_data, all_related_cves)
 
-    # Step 6: Save debug output if debug mode is enabled
+    # Step 7: Save debug output if debug mode is enabled
     _save_debug_output(cve_id, formatted_output)
 
     return formatted_output
