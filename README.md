@@ -22,6 +22,7 @@ The Vulners MCP is a server designed to retrieve CVE details and information abo
   - **Reference Links**: Official advisory URLs, vendor patches, and technical documentation sources
   - **Bulletin Classification**: Document type and classification for understanding advisory structure
 
+- **JSON Output**: Structured JSON output optimized for CrewAI and automated processing
 - **MCP Server**: Serve data through a robust and extensible MCP server for seamless integration with other tools.
 - **Docker Support**: Easily deploy the server using Docker for a consistent and portable runtime environment.
 - **Cursor Compatibility**: Integrate with Cursor MCP for enhanced developer workflows.
@@ -122,20 +123,115 @@ For troubleshooting and analysis purposes, you can enable debug mode by adding t
 When debug mode is enabled:
 
 - **Detailed Logging**: Enhanced logging output for troubleshooting API calls and data processing
-- **Debug Output Files**: Tool responses are automatically saved as `vulners_mcp_output_{CVE-ID}.txt` files in the project directory
+- **Debug Output Files**: Tool responses are automatically saved as `vulners_mcp_output_{CVE-ID}.json` files in the project directory
 - **Development Support**: Useful for analyzing tool behavior and validating output format
 
-#### Sample Output Files
+#### Sample Output Structure
 
-The repository includes sample debug output files demonstrating the CVE analysis tool's comprehensive vulnerability intelligence:
+The tools now return structured JSON output optimized for CrewAI and automated processing. Here are examples of the output structure:
 
-**CVE Analysis Tool Samples:**
+**CVE Analysis Tool JSON Output:**
 
-- **[CVE-2025-53770](vulners_mcp_output_CVE-2025-53770.txt)** - Microsoft SharePoint Server vulnerability with multi-source solutions
-- **[CVE-2025-31205](vulners_mcp_output_CVE-2025-31205.txt)** - WebKit vulnerability affecting multiple platforms  
-- **[CVE-2025-7395](vulners_mcp_output_CVE-2025-7395.txt)** - OpenSSL vulnerability with EPSS scoring
+```json
+{
+  "success": true,
+  "cve_id": "CVE-2021-44228",
+  "core_info": {
+    "id": "CVE-2021-44228",
+    "published": "2021-12-10T20:15:00.000Z",
+    "description": "Apache Log4j2 2.0-beta9 through 2.14.1 JNDI features used in configuration, log messages, and parameters do not protect against attacker controlled LDAP and other JNDI related endpoints..."
+  },
+  "cvss_metrics": [
+    {
+      "version": "3.1",
+      "source": "NVD",
+      "base_score": 10.0,
+      "base_severity": "CRITICAL",
+      "vector_string": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H"
+    }
+  ],
+  "epss_score": {
+    "score": 0.999,
+    "percentile": 99.9,
+    "date": "2021-12-10"
+  },
+  "cwe_classifications": ["CWE-502"],
+  "exploitation_status": {
+    "wild_exploited": true,
+    "sources": ["CISA", "Shadowserver"]
+  },
+  "affected_products": [
+    "Apache Log4j 2.x for Java",
+    "Apache Log4j 2.x for Windows"
+  ],
+  "solutions": [
+    "Update to Apache Log4j 2.17.0 or later",
+    "Apply vendor patches immediately"
+  ],
+  "related_cves": ["CVE-2021-45046", "CVE-2021-45105"]
+}
+```
 
-These files showcase the structured output format including CVSS metrics, CWE classifications, CAPEC attack patterns, exploitation status, affected products, and comprehensive solutions from multiple security intelligence sources. The Security Bulletin Tool produces simpler structured output focused on bulletin metadata and CVE cross-references.
+**Security Bulletin Tool JSON Output:**
+
+```json
+{
+  "success": true,
+  "bulletin_id": "GHSA-1234-5678-9abc",
+  "core_info": {
+    "id": "GHSA-1234-5678-9abc",
+    "type": "GHSA",
+    "published": "2021-12-10T20:15:00.000Z",
+    "description": "Critical vulnerability in Apache Log4j affecting multiple products..."
+  },
+  "related_cves": ["CVE-2021-44228", "CVE-2021-45046"]
+}
+```
+
+**Error Response Format:**
+
+```json
+{
+  "success": false,
+  "error": "VULNERS_API_KEY not configured. Please set VULNERS_API_KEY environment variable.",
+  "cve_id": "CVE-2021-44228"
+}
+```
+
+The JSON structure provides easy access to specific fields for automated processing and CrewAI integration.
+
+#### Benefits of JSON Output
+
+- **Structured Data Access**: Easy field extraction like `result["cvss_metrics"][0]["base_score"]`
+- **Type Safety**: Clear field types and structure for reliable processing
+- **Error Handling**: Consistent JSON error format with `success: false`
+- **CrewAI Integration**: Optimized for CrewAI agent workflows and automated processing
+- **Field Selection**: Direct access to nested data without parsing
+- **Array Handling**: Lists of solutions, affected products, etc. are properly structured
+
+#### Example Usage
+
+```python
+# CVE Info Tool
+result = await vulners_cve_info("CVE-2021-44228")
+if result["success"]:
+    cve_id = result["cve_id"]
+    description = result["core_info"]["description"]
+    cvss_score = result["cvss_metrics"][0]["base_score"]
+    affected_products = result["affected_products"]
+    solutions = result["solutions"]
+else:
+    error = result["error"]
+
+# Bulletin Info Tool
+result = await vulners_bulletin_info("GHSA-1234-5678-9abc")
+if result["success"]:
+    bulletin_id = result["bulletin_id"]
+    title = result["core_info"]["title"]
+    related_cves = result["related_cves"]
+else:
+    error = result["error"]
+```
 
 Restart Claude Desktop. Your configuration should look like this:
 
@@ -155,7 +251,7 @@ For non-CVE security bulletins (GHSA, RHSA, NASL, advisories), Claude can retrie
 
 ![Vulners MCP Tool Results](images/Claude_MCP_Tool_Usage.png)
 
-Both tools provide structured, machine-readable output optimized for LLM consumption. The CVE tool enables comprehensive vulnerability analysis reports, while the bulletin tool helps identify and cross-reference CVEs mentioned in security advisories for further detailed analysis.
+Both tools provide structured JSON output optimized for CrewAI and automated processing. The CVE tool enables comprehensive vulnerability analysis reports with easy field access, while the bulletin tool helps identify and cross-reference CVEs mentioned in security advisories for further detailed analysis.
 
 ### 3. Configuring and using Vulners MCP Server in Cursor
 
@@ -218,9 +314,9 @@ Vulners-MCP/
 │   ├── Claude_MCP_Tool_Usage.png
 │   ├── Cursor_MCP_Tool_Usage.png
 │   └── Vulners-MCP_Swagger_UI.png
-├── vulners_mcp_output_CVE-2025-53770.txt   # Sample: SharePoint vulnerability analysis
-├── vulners_mcp_output_CVE-2025-31205.txt   # Sample: WebKit vulnerability analysis  
-└── vulners_mcp_output_CVE-2025-7395.txt    # Sample: OpenSSL vulnerability analysis
+├── vulners_mcp_output_CVE-2025-53770.json   # Sample: SharePoint vulnerability analysis (JSON format)
+├── vulners_mcp_output_CVE-2025-31205.json   # Sample: WebKit vulnerability analysis (JSON format)
+└── vulners_mcp_output_CVE-2025-7395.json    # Sample: OpenSSL vulnerability analysis (JSON format)
 ```
 
 ## Contributing

@@ -1,3 +1,4 @@
 httpx
 fastmcp
 mcpo
+pydantic
