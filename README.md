@@ -1,5 +1,9 @@
 # Vulners-MCP
 
+[![MCP Server](https://img.shields.io/badge/MCP-Server-6E56CF)](https://modelcontextprotocol.io) [![FastAPI powered](https://img.shields.io/badge/FastAPI-powered-009688?logo=fastapi&logoColor=white)](#docker-deployment) [![OpenAPI 3.0](https://img.shields.io/badge/OpenAPI-3.0-6BA539?logo=openapiinitiative&logoColor=white)](#swagger-screenshot) [![Docker ready](https://img.shields.io/badge/Docker-ready-2496ED?logo=docker&logoColor=white)](#docker-deployment) [![Python 3.13+](https://img.shields.io/badge/Python-3.13%2B-3776AB?logo=python&logoColor=white)](#prerequisites) [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
+
+![Vulners MCP Banner](images/banner.png)
+
 The Vulners MCP is a server designed to retrieve CVE details and information about related documents using the Vulners API. It provides users with comprehensive vulnerability intelligence, including CVE description, CWEs, CVSS score, EPSS score and percentiles, references, exploitation status, and more, all in one place.
 
 ## Features
@@ -313,7 +317,8 @@ Vulners-MCP/
 │   ├── Claude_MCP_Configuration.png
 │   ├── Claude_MCP_Tool_Usage.png
 │   ├── Cursor_MCP_Tool_Usage.png
-│   └── Vulners-MCP_Swagger_UI.png
+│   ├── Vulners-MCP_Swagger_UI.png
+│   └── banner.png
 ├── vulners_mcp_output_CVE-2025-53770.json   # Sample: SharePoint vulnerability analysis (JSON format)
 ├── vulners_mcp_output_CVE-2025-31205.json   # Sample: WebKit vulnerability analysis (JSON format)
 └── vulners_mcp_output_CVE-2025-7395.json    # Sample: OpenSSL vulnerability analysis (JSON format)
