@@ -7,9 +7,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Any, Union
 from mcp.server.fastmcp import FastMCP
 import httpx
-import asyncio
-from pydantic import BaseModel, Field, validator, root_validator
-from datetime import datetime
+from pydantic import BaseModel, Field, field_validator
 
 # Configure logging based on DEBUG environment variable
 debug_mode = os.getenv("DEBUG", "false").lower() in ("true", "1", "yes", "on")
@@ -22,38 +20,26 @@ mcp = FastMCP("Vulners-MCP", stateless_http=False)
 # Global cache for CAPEC ID to name mapping
 _capec_cache = None
 
-def _safe_pydantic_conversion(model_class, data: dict, fallback_error: str = "Validation failed", cve_id: str = None, bulletin_id: str = None):
+def _safe_pydantic_conversion(model_class, data: Optional[dict], fallback_error: str = "Validation failed", cve_id: Optional[str] = None, bulletin_id: Optional[str] = None):
     """Safely convert dictionary data to Pydantic model with error handling."""
     try:
         if data is None:
             logging.error(f"Received None data for {model_class.__name__}")
             # Return a basic error response with available IDs
-            if model_class == CveInfoOutput:
-                if cve_id:
-                    return model_class(
-                        success=False,
-                        error=f"{fallback_error}: Received None data",
-                        cve_id=cve_id
-                    )
-                else:
-                    return model_class(
-                        success=False,
-                        error=f"{fallback_error}: Received None data",
-                        cve_id="UNKNOWN"
-                    )
-            elif model_class == BulletinInfoOutput:
-                if bulletin_id:
-                    return model_class(
-                        success=False,
-                        error=f"{fallback_error}: Received None data",
-                        bulletin_id=bulletin_id
-                    )
-                else:
-                    return model_class(
-                        success=False,
-                        error=f"{fallback_error}: Received None data",
-                        bulletin_id="UNKNOWN"
-                    )
+            # Handle different model types based on class name
+            class_name = getattr(model_class, '__name__', '')
+            if class_name == 'CveInfoOutput':
+                return model_class(
+                    success=False,
+                    error=f"{fallback_error}: Received None data",
+                    cve_id=cve_id if cve_id else "UNKNOWN"
+                )
+            elif class_name == 'BulletinInfoOutput':
+                return model_class(
+                    success=False,
+                    error=f"{fallback_error}: Received None data",
+                    bulletin_id=bulletin_id if bulletin_id else "UNKNOWN"
+                )
             else:
                 # Generic fallback - this shouldn't happen but just in case
                 return None
@@ -95,7 +81,8 @@ class CveInfoInput(BaseModel):
     """Input model for CVE information requests."""
     cve_id: str = Field(..., description="CVE ID in format CVE-YYYY-NNNN")
     
-    @validator('cve_id')
+    @field_validator('cve_id')
+    @classmethod
     def validate_cve_format(cls, v):
         if not re.match(r'^CVE-\d{4}-\d{4,}$', v, re.IGNORECASE):
             raise ValueError(f"Invalid CVE format: {v}. Expected format: CVE-YYYY-NNNN")
@@ -958,6 +945,23 @@ async def _fetch_related_documents_data(cve_data_json: dict, api_key: str) -> di
     if all_documents:
         doc_list = [doc for doc in all_documents.values() if isinstance(doc, dict)]
         doc_list.sort(key=lambda x: x.get('published', ''))
+        
+        # Log bulletin family distribution for debugging
+        bulletin_families = {}
+        for doc in doc_list:
+            family = doc.get('bulletinFamily', 'unknown')
+            doc_type = doc.get('type', 'unknown')
+            cve_count = len(doc.get('cvelist', [])) if isinstance(doc.get('cvelist'), list) else 0
+            # Use both fields to get complete picture
+            family_key = f"{family}/{doc_type}"
+            if family_key not in bulletin_families:
+                bulletin_families[family_key] = {'count': 0, 'total_cves': 0, 'large_cve_lists': 0, 'exploit_large_lists': 0}
+            bulletin_families[family_key]['count'] += 1
+            bulletin_families[family_key]['total_cves'] += cve_count
+            if cve_count > 10:
+                bulletin_families[family_key]['large_cve_lists'] += 1
+        
+        logging.debug(f"Bulletin family distribution: {bulletin_families}")
 
         if not doc_list:
             result['error'] = 'NO_DETAILS_FOUND'
@@ -965,19 +969,24 @@ async def _fetch_related_documents_data(cve_data_json: dict, api_key: str) -> di
         else:
             # Filter documents first based on CVE count, then process
             filtered_docs = []
+            docs_filtered = 0
+            
             for doc_content in doc_list:
                 cvelist = doc_content.get('cvelist')
+                # Check both bulletinFamily and type fields for document type
                 bulletin_family = doc_content.get('bulletinFamily', '').lower()
+                doc_type = doc_content.get('type', '').lower()
+                cve_count = len(cvelist) if isinstance(cvelist, list) else 0
                 
-                # Apply different CVE limits based on bulletinFamily
-                if bulletin_family == 'exploit':
-                    # For exploits, limit to 5 or fewer CVEs
-                    if not isinstance(cvelist, list) or len(cvelist) <= 5:
-                        filtered_docs.append(doc_content)
+                # Apply strict CVE limit for ALL document types
+                # Limit to 10 or fewer CVEs for any document type to prevent overwhelming output
+                if not isinstance(cvelist, list) or len(cvelist) <= 10:
+                    filtered_docs.append(doc_content)
                 else:
-                    # For other types, limit to 50 or fewer CVEs
-                    if not isinstance(cvelist, list) or len(cvelist) <= 50:
-                        filtered_docs.append(doc_content)
+                    docs_filtered += 1
+                    logging.debug(f"Filtered out {bulletin_family or doc_type} document {doc_content.get('id', 'unknown')} with {cve_count} CVEs (limit: 10)")
+            
+            logging.info(f"Document filtering: {docs_filtered} documents filtered out due to CVE count limit (max 10 CVEs per document)")
             
             if not filtered_docs:
                 result['error'] = 'NO_DETAILS_FOUND'
@@ -1291,8 +1300,6 @@ def _clean_text_for_llm(text: str) -> str:
     
     return cleaned
 
-
-
 def _process_cve_affected_products(cna_affected_data) -> list[str]:
     """Processes cnaAffected data and returns a list of affected product descriptions.
     
@@ -1389,7 +1396,6 @@ def _process_cve_affected_products(cna_affected_data) -> list[str]:
             final_unique.append(product)
     
     return final_unique
-
 
 async def _fetch_bulletin_data(bulletin_id: str, api_key: str) -> dict:
     """Fetches raw bulletin data from Vulners API for any bulletin ID and returns structured data."""
