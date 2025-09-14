@@ -846,6 +846,8 @@ async def _fetch_related_documents_data(cve_data_json: dict, api_key: str) -> di
     }
 
     combined_ids_from_all_idlists = []
+    all_documents = {}
+    cve_id_for_fallback = cve_data_json.get('id', '') if isinstance(cve_data_json, dict) else ''
 
     enchantments = cve_data_json.get('enchantments')
     if isinstance(enchantments, dict):
@@ -854,8 +856,8 @@ async def _fetch_related_documents_data(cve_data_json: dict, api_key: str) -> di
             references_list = dependencies.get('references')
             if isinstance(references_list, list):
                 if not references_list:
+                    # Keep error note but do not return; we'll try Lucene fallback below
                     result['error'] = 'NO_DOCUMENTS'
-                    return result
                 else:
                     for item in references_list:
                         if isinstance(item, dict):
@@ -867,22 +869,70 @@ async def _fetch_related_documents_data(cve_data_json: dict, api_key: str) -> di
                                 combined_ids_from_all_idlists.extend(filtered_ids)
                                 logging.debug(f"Added {len(filtered_ids)} IDs from {item.get('type', 'unknown')} references (total so far: {len(combined_ids_from_all_idlists)})")
             else:
+                # Keep error note but do not return; we'll try Lucene fallback below
                 result['error'] = 'NO_REFERENCES_LIST'
-                return result
         else:
+            # Keep error note but do not return; we'll try Lucene fallback below
             result['error'] = 'NO_DEPENDENCIES'
-            return result
     else:
+        # Keep error note but do not return; we'll try Lucene fallback below
         result['error'] = 'NO_ENCHANTMENTS'
-        return result
             
     if not combined_ids_from_all_idlists:
-        result['error'] = 'NO_RELEVANT_IDS'
-        return result
+        # Lucene fallback: search all documents mentioning this CVE in cvelist
+        if isinstance(cve_id_for_fallback, str) and cve_id_for_fallback:
+            try:
+                logging.info(f"No idList references found; performing Lucene fallback for {cve_id_for_fallback}")
+                url = "https://vulners.com/api/v3/search/lucene"
+                related_doc_fields = [
+                    "type", "published", "id", "title", "href", "bulletinFamily",
+                    "cvelist", "viewCount", "affectedPackage", "naslFamily", "solution"
+                ]
+                payload = {
+                    "query": f"cvelist:{cve_id_for_fallback}",
+                    "skip": 0,
+                    "size": 200,
+                    "fields": related_doc_fields
+                }
+                headers = {
+                    'Content-Type': 'application/json',
+                    'X-Api-Key': api_key
+                }
+                timeout = httpx.Timeout(60.0, connect=15.0)
+                async with httpx.AsyncClient(timeout=timeout) as client:
+                    logging.debug(f"Making Lucene fallback request to {url} for {cve_id_for_fallback}")
+                    response = await client.post(url, json=payload, headers=headers)
+                    logging.debug(f"Lucene fallback response status: {response.status_code}")
+                    response.raise_for_status()
+                    data = response.json()
+                    search_hits = []
+                    if isinstance(data, dict) and 'data' in data and isinstance(data['data'], dict):
+                        search_hits = data['data'].get('search', [])
+                    for hit in search_hits:
+                        source = hit.get('_source') if isinstance(hit, dict) else None
+                        if isinstance(source, dict):
+                            # Filter out internal/non-authoritative families consistent with ID filtering logic
+                            bf = str(source.get('bulletinFamily', '')).lower()
+                            if bf in ['nvd', 'cvelist', 'vulnrichment']:
+                                continue
+                            doc_id = source.get('id')
+                            if isinstance(doc_id, str) and doc_id:
+                                all_documents[doc_id] = source
+                if not all_documents:
+                    result['error'] = 'NO_RELEVANT_IDS'
+                    return result
+                logging.info(f"Lucene fallback found {len(all_documents)} documents for {cve_id_for_fallback}")
+            except httpx.HTTPStatusError as e:
+                logging.error(f"Lucene fallback HTTP error: HTTP {e.response.status_code}")
+                result['error'] = f"LUCENE_HTTP_ERROR_{e.response.status_code}"
+                return result
+            except Exception as e:
+                logging.error(f"Lucene fallback unexpected error: {str(e)}")
+                result['error'] = f"LUCENE_UNEXPECTED_ERROR_{str(e)}"
+                return result
 
     # Process IDs in chunks to avoid API limits (Vulners API has ~100 ID limit)
     chunk_size = 100
-    all_documents = {}
     
     logging.debug(f"Processing {len(combined_ids_from_all_idlists)} related document IDs in chunks of {chunk_size}")
     
@@ -967,26 +1017,10 @@ async def _fetch_related_documents_data(cve_data_json: dict, api_key: str) -> di
             result['error'] = 'NO_DETAILS_FOUND'
             return result
         else:
-            # Filter documents first based on CVE count, then process
-            filtered_docs = []
+            # Use all collected documents; do not drop by CVE count to avoid excluding vendor/scanner advisories
+            filtered_docs = doc_list
             docs_filtered = 0
-            
-            for doc_content in doc_list:
-                cvelist = doc_content.get('cvelist')
-                # Check both bulletinFamily and type fields for document type
-                bulletin_family = doc_content.get('bulletinFamily', '').lower()
-                doc_type = doc_content.get('type', '').lower()
-                cve_count = len(cvelist) if isinstance(cvelist, list) else 0
-                
-                # Apply strict CVE limit for ALL document types
-                # Limit to 10 or fewer CVEs for any document type to prevent overwhelming output
-                if not isinstance(cvelist, list) or len(cvelist) <= 10:
-                    filtered_docs.append(doc_content)
-                else:
-                    docs_filtered += 1
-                    logging.debug(f"Filtered out {bulletin_family or doc_type} document {doc_content.get('id', 'unknown')} with {cve_count} CVEs (limit: 10)")
-            
-            logging.info(f"Document filtering: {docs_filtered} documents filtered out due to CVE count limit (max 10 CVEs per document)")
+            logging.info("Document filtering: disabled CVE-count filter; including all referenced documents")
             
             if not filtered_docs:
                 result['error'] = 'NO_DETAILS_FOUND'
